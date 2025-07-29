@@ -21,5 +21,8 @@ def get_blacklist(limit=10):
         data = response.json()['data']
         for entry in data[:limit]:
             print(f"{entry['ipAddress']} | Score: {entry['abuseConfidenceScore']} | Country: {entry['countryCode']}")
-        else:
-            print(f"Error: {response.status_code} - {response.text}")
+    else:
+        print(f"Error: {response.status_code} - {response.text}")
+
+if __name__ == "__main__":
+    get_blacklist()
