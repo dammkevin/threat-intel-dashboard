@@ -1,85 +1,111 @@
-import requests
-import os
 import argparse
 import json
 import csv
 
-API_KEY = os.getenv("ABUSEIPDB_API_KEY")
-BASE_URL = "https://api.abuseipdb.com/api/v2/blacklist"
+from ioc_sources.abuseipdb import get_abuseipdb_iocs
+from ioc_sources.alienvault_otx import get_otx_iocs
 
 
-# Parse command-line arguments
+CANONICAL_TYPE_MAP = {
+    # OTX might return "IPv4", "domain", "URL", "MD5", "SHA256"
+    "IPv4": "ip",
+    "IPv6": "ip",
+    "domain": "domain",
+    "hostname": "domain",
+    "URL": "url",
+    "MD5": "hash",
+    "SHA1": "hash",
+    "SHA256": "hash",
+}
+
 def parse_args():
-    parser = argparse.ArgumentParser(description="AbuseIPDB IOC Fetcher with filtering and export options")
-    parser.add_argument("--country", help="Filter results by country code (e.g. US, CN)")
-    parser.add_argument("--min-score", type=int, default=90, help="Minimum abuse confidence score (25–100)")
-    parser.add_argument("--limit", type=int, default=10, help="Maximum number of results to display")
+    parser = argparse.ArgumentParser(description="Threat Intel CLI Aggregator")
+    parser.add_argument("--sources",
+                        default="abuseipdb,otx",
+                        help="Comma-separated list of sources to pull (abuseipdb, otx)")
+    parser.add_argument("--country", help="Filter by country code (applies to sources that include country)")
+    parser.add_argument("--min-score", type=int, default=90, help="Minimum abuse score (25–100, AbuseIPDB only)")
+    parser.add_argument("--type", help="Filter by IOC type (ip, domain, url, hash)")
+    parser.add_argument("--limit", type=int, default=10, help="Maximum number of results to display (after filtering/dedup)")
     parser.add_argument("--save-to", choices=["json", "csv"], help="Export results to a JSON or CSV file")
     return parser.parse_args()
 
-# Fetch and optionally export IOCs
-def get_blacklist(min_score=90, country=None, limit=10, save_to=None):
-    if not API_KEY:
-        print("API key not found. Set it using the ABUSEIPDB_API_KEY environment variable.")
-        return
+def canonical_type(t):
+    if not t:
+        return None
+    return CANONICAL_TYPE_MAP.get(t, t.lower())
 
-    headers = {
-        'Key': API_KEY,
-        'Accept': 'application/json'
-    }
+def export_results(iocs, format="json"):
+    if format == "json":
+        with open("ioc_results.json", "w") as f:
+            json.dump(iocs, f, indent=2)
+        print("Results saved to ioc_results.json")
+    elif format == "csv":
+        with open("ioc_results.csv", "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["type", "value", "score", "country", "source", "tags", "date"])
+            writer.writeheader()
+            writer.writerows(iocs)
+        print("Results saved to ioc_results.csv")
 
-    params = {
-        'confidenceMinimum': min_score
-    }
+def fetch_from_sources(sources, min_score, country):
+    all_iocs = []
 
-    response = requests.get(BASE_URL, headers=headers, params=params)
+    if "abuseipdb" in sources:
+        all_iocs.extend(
+            get_abuseipdb_iocs(min_score=min_score, country=country, limit=10_000)  # fetch plenty; we’ll limit later
+        )
 
-    if response.status_code == 200:
-        data = response.json().get('data', [])
-        results = []
-        shown = 0
+    if "otx" in sources:
+        all_iocs.extend(
+            get_otx_iocs(limit=10_000)
+        )
 
-        for entry in data:
-            if country and entry['countryCode'].upper() != country.upper():
-                continue
+    # Normalize types to canonical set
+    for i in all_iocs:
+        i["type"] = canonical_type(i.get("type"))
 
-            result = {
-                'ip': entry['ipAddress'],
-                'score': entry['abuseConfidenceScore'],
-                'country': entry['countryCode']
-            }
+    return all_iocs
 
-            # Print to console
-            print(f"{result['ip']} | Score: {result['score']} | Country: {result['country']}")
-            results.append(result)
+def dedupe_iocs(iocs):
+    seen = set()
+    deduped = []
+    for i in iocs:
+        key = f"{i.get('type')}:{i.get('value')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(i)
+    return deduped
 
-            shown += 1
-            if shown >= limit:
-                break
+def apply_filters(iocs, ioc_type=None, country=None):
+    out = []
+    for i in iocs:
+        if ioc_type and i.get("type") != ioc_type:
+            continue
+        if country and i.get("country") and i.get("country").upper() != country.upper():
+            continue
+        out.append(i)
+    return out
 
-        # Export to file if requested
-        if save_to == "json":
-            with open("ioc_results.json", "w") as f:
-                json.dump(results, f, indent=2)
-            print("Results saved to ioc_results.json")
-
-        elif save_to == "csv":
-            with open("ioc_results.csv", "w", newline='') as f:
-                writer = csv.DictWriter(f, fieldnames=["ip", "score", "country"])
-                writer.writeheader()
-                writer.writerows(results)
-            print("Results saved to ioc_results.csv")
-
-    else:
-        print(f"Error {response.status_code}: {response.text}")
-
-
-# Entry point
 if __name__ == "__main__":
     args = parse_args()
-    get_blacklist(
+
+    requested_sources = set(s.strip().lower() for s in args.sources.split(",") if s.strip())
+
+    iocs = fetch_from_sources(
+        sources=requested_sources,
         min_score=args.min_score,
-        country=args.country,
-        limit=args.limit,
-        save_to=args.save_to
+        country=args.country
     )
+
+    iocs = dedupe_iocs(iocs)
+    iocs = apply_filters(iocs, ioc_type=args.type, country=args.country)
+
+    # Final display limit (after dedup and filters)
+    iocs = iocs[:args.limit]
+
+    for ioc in iocs:
+        print(f"{ioc['value']} | Type: {ioc['type']} | Score: {ioc['score']} | Country: {ioc['country']} | Source: {ioc['source']}")
+
+    if args.save_to:
+        export_results(iocs, args.save_to)
