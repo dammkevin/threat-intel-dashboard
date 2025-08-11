@@ -4,6 +4,7 @@ import csv
 
 from ioc_sources.abuseipdb import get_abuseipdb_iocs
 from ioc_sources.alienvault_otx import get_otx_iocs
+from ioc_sources.urlhaus import get_urlhaus_iocs
 
 
 CANONICAL_TYPE_MAP = {
@@ -21,8 +22,8 @@ CANONICAL_TYPE_MAP = {
 def parse_args():
     parser = argparse.ArgumentParser(description="Threat Intel CLI Aggregator")
     parser.add_argument("--sources",
-                        default="abuseipdb,otx",
-                        help="Comma-separated list of sources to pull (abuseipdb, otx)")
+                        default="abuseipdb,otx,urlhaus",
+                        help="Comma-separated list of sources to pull (abuseipdb, otx, urlhaus)")
     parser.add_argument("--country", help="Filter by country code (applies to sources that include country)")
     parser.add_argument("--min-score", type=int, default=90, help="Minimum abuse score (25–100, AbuseIPDB only)")
     parser.add_argument("--type", help="Filter by IOC type (ip, domain, url, hash)")
@@ -58,6 +59,12 @@ def fetch_from_sources(sources, min_score, country):
     if "otx" in sources:
         all_iocs.extend(
             get_otx_iocs(limit=10_000)
+        )
+
+    if "urlhaus" in sources:
+        # Only include "online" URLs by default so results are actionable
+        all_iocs.extend(
+            get_urlhaus_iocs(limit=10_000, online_only=True)
         )
 
     # Normalize types to canonical set
